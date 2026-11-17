@@ -28,7 +28,7 @@ teammate merges it, the run shows their name instead of yours.
 ## One-time setup (pipeline owner)
 
 ### 1. Docker Hub
-- Create a **public** repository `abc-sms`.
+- Create a **public** repository `group1-sms-repo`.
 - Account Settings -> Personal access tokens -> new token (Read & Write).
 
 ### 2. AWS Learner Lab: Elastic Beanstalk
@@ -53,6 +53,11 @@ Settings -> Secrets and variables -> Actions:
 | Variable | `EB_APP_NAME` | `abc-sms` |
 | Variable | `EB_ENV_NAME` | `abc-sms-env` |
 | Variable | `AWS_REGION` | `us-east-1` |
+| Variable | `DEPLOY_ENABLED` | `false` normally; `true` only while the Beanstalk environment is running |
+
+With `DEPLOY_ENABLED=false`, merges still run lint, tests, build and push to Docker Hub; only the deploy job is
+skipped. When the environment is up again, set it to `true` and re-run the workflow: the latest `main`
+(every merged feature) deploys at once.
 
 Settings -> Branches -> add rule for `main`: require a pull request, 1 approval, and status check **Lint and test**.
 
