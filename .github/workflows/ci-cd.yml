@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/abc-sms
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/group1-sms-repo
   AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
 
 jobs:
