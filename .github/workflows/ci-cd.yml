@@ -1,0 +1,117 @@
+name: CI/CD - SMS
+
+# Initial pipeline (Figure 1): push/PR -> test -> build image -> Docker Hub -> Elastic Beanstalk
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# One deploy at a time, so four people merging close together don't race each other
+concurrency:
+  group: sms-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/abc-sms
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Lint (flake8)
+        run: flake8 .
+      - name: Unit tests (pytest)
+        run: pytest -v --junitxml=test-results.xml
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results
+          path: test-results.xml
+
+  build-push:
+    name: Build and push image
+    needs: test
+    # PRs only test; images are built and pushed from main only
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: meta
+        run: echo "image=${IMAGE_NAME}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          build-args: APP_VERSION=${{ github.sha }}
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    name: Deploy to Elastic Beanstalk
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package Dockerrun.aws.json
+        run: |
+          sed "s|__IMAGE__|${{ needs.build-push.outputs.image }}|" deploy/Dockerrun.aws.json.template > Dockerrun.aws.json
+          cat Dockerrun.aws.json
+          zip deploy.zip Dockerrun.aws.json
+
+      - name: Create application version and deploy
+        env:
+          EB_APP: ${{ vars.EB_APP_NAME }}
+          EB_ENV: ${{ vars.EB_ENV_NAME }}
+        run: |
+          LABEL="${GITHUB_SHA::7}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          BUCKET=$(aws elasticbeanstalk create-storage-location --query S3Bucket --output text)
+          aws s3 cp deploy.zip "s3://${BUCKET}/${EB_APP}/${LABEL}.zip"
+          aws elasticbeanstalk create-application-version \
+            --application-name "$EB_APP" --version-label "$LABEL" \
+            --source-bundle S3Bucket="$BUCKET",S3Key="${EB_APP}/${LABEL}.zip"
+          aws elasticbeanstalk update-environment \
+            --environment-name "$EB_ENV" --version-label "$LABEL"
+          aws elasticbeanstalk wait environment-updated --environment-names "$EB_ENV"
+          echo "LABEL=$LABEL" >> "$GITHUB_ENV"
+
+      - name: Smoke test the live URL
+        env:
+          EB_ENV: ${{ vars.EB_ENV_NAME }}
+        run: |
+          URL=$(aws elasticbeanstalk describe-environments --environment-names "$EB_ENV" \
+                --query "Environments[0].CNAME" --output text)
+          echo "Live URL: http://${URL}"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS "http://${URL}/health" | grep -q "${GITHUB_SHA}"; then
+              echo "Deployed version is live"; exit 0
+            fi
+            sleep 10
+          done
+          echo "Health check failed or old version still serving"; exit 1
